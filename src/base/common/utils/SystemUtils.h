@@ -3,6 +3,7 @@
 #include "ErrorUtils.h"
 
 #include <utility>
+#include <vector>
 
 namespace hestia {
 

@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 /**
  * @brief Socket class - wraps the system socket library
