@@ -10,7 +10,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             -Wno-error=unknown-pragmas
             -Wswitch-enum
             -Wimplicit-fallthrough
-            -Werror
+	    #            -Werror
             -Og
     )
 

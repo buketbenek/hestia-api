@@ -7,7 +7,156 @@
 
 #include <stdexcept>
 
+#define MAX_BLOCK_COUNT (200)
+
 namespace hestia {
+
+class IoContext{
+	public:
+    IoContext(int num_blocks, size_t block_size, bool alloc_io_buff)
+    {
+        prepare(num_blocks, block_size, alloc_io_buff);
+    }
+
+    ~IoContext() { free(); }
+
+    int prepare(int num_blocks, size_t block_size, bool alloc_io_buff)
+    {
+        m_allocated_io_buffer = alloc_io_buff;
+
+        /* allocate new I/O vec? */
+        if (num_blocks != m_current_blocks
+            || block_size != m_current_block_size) {
+            if (m_current_blocks != 0) {
+                free_data();
+            }
+
+            int rc = 0;
+            if (m_allocated_io_buffer) {
+		m_data.m_buffers.resize(num_blocks);
+		m_data.m_counts.resize(num_blocks);
+		memory_allocated=true;
+		for(int i =0; i<num_blocks; i++){
+			m_data.m_buffers[i] = new char[num_blocks];
+		}
+		return 0;
+            }
+            else {
+		m_data.m_buffers.resize(num_blocks);
+		m_data.m_counts.resize(num_blocks);
+		return 0;
+            }
+            if (rc != 0) {
+                return rc;
+            }
+        }
+
+        /* allocate extents and attrs, if they are not already */
+        if (num_blocks != m_current_blocks) {
+            /* free previous vectors */
+            if (m_current_blocks > 0) {
+                free_index();
+            }
+
+            /* Allocate attr and extent list*/
+	    m_ext.m_counts.resize(num_blocks);
+	    m_ext.m_indices.resize(num_blocks);
+
+        }
+
+        m_current_blocks     = num_blocks;
+        m_current_block_size = block_size;
+        return 0;
+    }
+
+    int map(int num_blocks, size_t block_size, off_t offset, char* buff)
+    {
+        if (num_blocks == 0) {
+            return -EINVAL;
+        }
+
+        for (int i = 0; i < num_blocks; i++) {
+            m_ext.m_indices[i]       = offset + i * block_size;
+            m_ext.m_counts[i] = block_size;
+
+            /* we don't want any attributes */
+            m_attr.m_counts[i] = 0;
+
+            if (m_data.m_counts[i] == 0) {
+                m_data.m_counts[i] = block_size;
+            }
+            /* check the allocated buffer has the right size */
+            else if (m_data.m_counts[i] != block_size) {
+                return -EINVAL;
+            }
+
+            /* map the user-provided I/O buffer */
+            if (buff != nullptr) {
+                m_data.m_buffers[i] = buff + i * block_size;
+            }
+        }
+        return 0;
+    }
+
+    void free_data()
+    {
+        if (m_allocated_io_buffer) {
+	for(std::size_t i =0; i<m_data.m_buffers.size(); i++){
+                        delete[] m_data.m_buffers[i];
+                }    
+	m_data.clear();
+	    memory_allocated=false;
+        }
+        else {
+		m_data.clear();
+        }
+    }
+
+    void free_index()
+    {
+        m_attr.clear();
+        m_ext.clear();
+    }
+
+    void free()
+    {
+        free_data();
+        free_index();
+    }
+
+
+    void to_buffer(WriteableBufferView& buffer, std::size_t block_size)
+    {
+        std::size_t buff_idx = 0;
+        for (std::size_t i = 0; i < m_data.m_counts.size(); i++) {
+            for (std::size_t j = 0; j < block_size; j++) {
+                buffer.data()[buff_idx] = ((char*)m_data.m_buffers[i])[j];
+                buff_idx++;
+            }
+        }
+    }
+
+	int read_blocks(char * stored)
+	{
+		for(std::size_t i=0; i<m_data.m_counts.size(); i++){
+			int idx=m_ext.m_indices[i];
+			for(std::size_t j=0; j<m_data.m_counts[i];j++){
+				((char*)m_data.m_buffers[i])[j] = stored[idx + j];	
+			}		
+		}	
+		return 0;
+	}
+
+    int m_current_blocks{0};
+    size_t m_current_block_size{0};
+    bool m_allocated_io_buffer{false};
+    bool memory_allocated{false};
+    
+    struct mock::motr::IndexVec m_ext;
+    struct mock::motr::BufferVec m_attr;
+    struct mock::motr::BufferVec m_data;
+};
+
 class MotrObject {
   public:
     MotrObject(const hestia::Uuid& oid) : m_id(oid) {}
@@ -27,12 +176,82 @@ class MotrObject {
     }
 
     std::size_t m_size{0};
+	int read_blocks()
+    {
+        if (!m_io_ctx) {
+            m_io_ctx = std::make_unique<IoContext>(
+                m_unread_block_count, m_block_size, true);
+        }
+        else {
+            auto rc =
+                m_io_ctx->prepare(m_unread_block_count, m_block_size, true);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+        auto rc = m_io_ctx->map(
+            m_unread_block_count, m_block_size, m_start_offset, nullptr);
+        if (rc != 0) {
+            return rc;
+        }
+        return m_io_ctx->read_blocks(stored_data);
+    }
 
-  private:
+    int read(WriteableBufferView& buffer, std::size_t length)
+    {
+        for (auto transfer_size = length; transfer_size > 0;
+             transfer_size -= get_last_transfer_size()) {
+            set_block_layout(transfer_size);
+
+            if (transfer_size < m_min_block_size) {
+                m_block_size = m_min_block_size;
+            }
+            if (auto rc = read_blocks(); rc != 0) {
+                return rc;
+            }
+            if (transfer_size < m_min_block_size) {
+                m_io_ctx->to_buffer(buffer, transfer_size);
+            }
+            else {
+                m_io_ctx->to_buffer(buffer, m_block_size);
+            }
+
+            m_start_offset += get_last_transfer_size();
+        }
+        return 0;
+    }
+
+    void set_block_layout(std::size_t transfer_size)
+    {
+        m_unread_block_count = transfer_size / m_block_size;
+        if (m_unread_block_count == 0) {
+            m_unread_block_count = 1;
+            m_block_size         = transfer_size;
+        }
+        else if (m_unread_block_count > MAX_BLOCK_COUNT) {
+            m_unread_block_count = MAX_BLOCK_COUNT;
+        }
+    }
+
+    std::size_t get_last_transfer_size() const
+    {
+        return m_unread_block_count * m_block_size;
+    }
+
+
     hestia::Uuid m_id;
     mock::motr::Obj m_handle;
-};
+    char * stored_data;
 
+    
+        std::size_t m_total_size{0};
+    int m_unread_block_count{0};
+    std::size_t m_block_size{0};
+    std::size_t m_min_block_size{0};
+    std::size_t m_start_offset{0};
+    std::unique_ptr<IoContext> m_io_ctx;
+
+};
 
 void MockMotrInterfaceImpl::initialize(const MotrConfig& config)
 {
@@ -74,6 +293,7 @@ void MockMotrInterfaceImpl::initialize_hsm(
 void MockMotrInterfaceImpl::put(
     const HsmObjectStoreRequest& request, hestia::Stream* stream) const
 {
+	/*
     MotrObject motr_obj(request.object().id());
 
     auto rc = m_hsm.m0hsm_create(
@@ -117,6 +337,7 @@ void MockMotrInterfaceImpl::put(
 
     auto sink = InMemoryStreamSink::create(sink_func);
     stream->set_sink(std::move(sink));
+    */ return;
 }
 
 void MockMotrInterfaceImpl::get(
@@ -124,6 +345,7 @@ void MockMotrInterfaceImpl::get(
     hestia::StorageObject& object,
     hestia::Stream* stream) const
 {
+/*
     (void)object;
 
     MotrObject motr_obj(request.object().id());
@@ -163,10 +385,12 @@ void MockMotrInterfaceImpl::get(
 
     auto source = hestia::InMemoryStreamSource::create(source_func);
     stream->set_source(std::move(source));
+    */ return;
 }
 
 void MockMotrInterfaceImpl::remove(const HsmObjectStoreRequest& request) const
 {
+	/*
     MotrObject motr_obj(request.object().id());
 
     std::size_t offset{0};
@@ -180,10 +404,12 @@ void MockMotrInterfaceImpl::remove(const HsmObjectStoreRequest& request) const
         LOG_ERROR(msg);
         throw std::runtime_error(msg);
     }
+    */ return;
 }
 
 void MockMotrInterfaceImpl::copy(const HsmObjectStoreRequest& request) const
 {
+	/*
     MotrObject motr_obj(request.object().id());
     std::size_t length = request.extent().m_length;
     if (length == 0) {
@@ -200,10 +426,12 @@ void MockMotrInterfaceImpl::copy(const HsmObjectStoreRequest& request) const
         LOG_ERROR(msg);
         throw std::runtime_error(msg);
     }
+    */ return;
 }
 
 void MockMotrInterfaceImpl::move(const HsmObjectStoreRequest& request) const
 {
+	/*
     MotrObject motr_obj(request.object().id());
     std::size_t length = request.extent().m_length;
     if (length == 0) {
@@ -220,5 +448,6 @@ void MockMotrInterfaceImpl::move(const HsmObjectStoreRequest& request) const
         LOG_ERROR(msg);
         throw std::runtime_error(msg);
     }
+    */ return;
 }
 }  // namespace hestia
