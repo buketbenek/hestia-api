@@ -74,7 +74,7 @@ void DistributedHsmObjectStoreClient::do_initialize(
 HsmObjectStoreResponse::Ptr DistributedHsmObjectStoreClient::do_remote_get(
     const HsmObjectStoreRequest& request, Stream* stream) const
 {
-    auto response = HsmObjectStoreResponse::create(request, "");
+    auto response = HsmObjectStoreResponse::create(request, m_id);
 
     if (m_http_client == nullptr) {
         const std::string message =
@@ -139,7 +139,7 @@ HsmObjectStoreResponse::Ptr DistributedHsmObjectStoreClient::do_remote_get(
 HsmObjectStoreResponse::Ptr DistributedHsmObjectStoreClient::do_remote_put(
     const HsmObjectStoreRequest& request, Stream* stream) const
 {
-    auto response = HsmObjectStoreResponse::create(request, "");
+    auto response = HsmObjectStoreResponse::create(request, m_id);
 
     if (m_http_client == nullptr) {
         const std::string message =
@@ -209,7 +209,7 @@ HsmObjectStoreResponse::Ptr
 DistributedHsmObjectStoreClient::do_remote_copy_or_move(
     const HsmObjectStoreRequest& request, bool is_copy) const
 {
-    auto response = HsmObjectStoreResponse::create(request, "");
+    auto response = HsmObjectStoreResponse::create(request, m_id);
     response->set_is_handled_remote(true);
 
     if (m_http_client == nullptr) {
@@ -280,6 +280,7 @@ DistributedHsmObjectStoreClient::do_remote_copy_or_move(
 HsmObjectStoreResponse::Ptr DistributedHsmObjectStoreClient::do_local_op(
     const HsmObjectStoreRequest& request, Stream* stream, uint8_t tier) const
 {
+    LOG_INFO(request.to_string());
     if (auto hsm_client = m_client_manager->get_hsm_client(tier);
         hsm_client != nullptr) {
         return hsm_client->make_request(request, stream);
@@ -297,6 +298,7 @@ HsmObjectStoreResponse::Ptr
 DistributedHsmObjectStoreClient::do_local_copy_or_move(
     const HsmObjectStoreRequest& request, bool is_copy) const
 {
+    auto response = HsmObjectStoreResponse::create(request, m_id);
     Stream stream;
 
     HsmObjectStoreRequest get_request(
@@ -310,6 +312,7 @@ DistributedHsmObjectStoreClient::do_local_copy_or_move(
     put_request.set_extent(request.extent());
 
     HsmObjectStoreResponse::Ptr get_response;
+
     if (auto hsm_client =
             m_client_manager->get_hsm_client(request.source_tier());
         hsm_client != nullptr) {
@@ -328,6 +331,7 @@ DistributedHsmObjectStoreClient::do_local_copy_or_move(
     }
 
     HsmObjectStoreResponse::Ptr put_response;
+
     if (auto hsm_client =
             m_client_manager->get_hsm_client(request.target_tier());
         hsm_client != nullptr) {
@@ -345,14 +349,12 @@ DistributedHsmObjectStoreClient::do_local_copy_or_move(
         return put_response;
     }
 
-    auto result = HsmObjectStoreResponse::create(request, m_id);
-
     auto stream_result = stream.flush();
     if (!stream_result.ok()) {
-        result->on_error(
+        response->on_error(
             {HsmObjectStoreErrorCode::ERROR,
              "Failed to flush stream copying or moving between clients"});
-        return result;
+        return response;
     }
 
     if (!is_copy) {
@@ -362,6 +364,7 @@ DistributedHsmObjectStoreClient::do_local_copy_or_move(
         release_request.set_extent(request.extent());
 
         HsmObjectStoreResponse::Ptr release_response;
+
         if (auto hsm_client =
                 m_client_manager->get_hsm_client(request.source_tier());
             hsm_client != nullptr) {
@@ -379,7 +382,7 @@ DistributedHsmObjectStoreClient::do_local_copy_or_move(
             return release_response;
         }
     }
-    return result;
+    return response;
 }
 
 HsmObjectStoreResponse::Ptr
@@ -651,7 +654,7 @@ HsmObjectStoreResponse::Ptr DistributedHsmObjectStoreClient::make_request(
     }
     else if (request.method() == HsmObjectStoreRequestMethod::PUT) {
         if (m_client_manager->has_client(request.target_tier())) {
-            LOG_INFO("Found local client for target tier");
+            LOG_INFO("Found local client for target tier: " << request.target_tier());
             return do_local_op(request, stream, request.target_tier());
         }
         else if (request.method() == HsmObjectStoreRequestMethod::PUT) {

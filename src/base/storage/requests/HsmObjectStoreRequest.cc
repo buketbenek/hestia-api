@@ -113,7 +113,7 @@ std::string HsmObjectStoreRequest::to_string() const
     sstr << "Operation: " << to_string(m_method) << " | ";
     sstr << "Extent: " << extent().to_string() << " | ";
     sstr << "Source Tier: " << m_source_tier << " | ";
-    sstr << "mTargetTier Tier: " << m_target_tier;
+    sstr << "Target Tier: " << m_target_tier;
     return sstr.str();
 }
 
